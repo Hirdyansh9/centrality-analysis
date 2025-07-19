@@ -1,0 +1,255 @@
+#include "centrality_engine.h"
+#include <iostream>
+#include <fstream>
+#include <queue>
+#include <stack>
+#include <cmath>
+#include <algorithm>
+#include <omp.h> 
+
+// --- Graph Implementation ---
+Graph::Graph(int V) : V(V), adj(V) {}
+
+void Graph::addEdge(int u, int v) {
+    // Ensure adjacency list is large enough
+    if (u >= adj.size() || v >= adj.size()) {
+        adj.resize(std::max(u, v) + 1);
+    }
+    adj[u].push_back(v);
+    adj[v].push_back(u); // For undirected graph
+}
+
+
+// --- GraphLoader Implementation ---
+Graph GraphLoader::loadFromEdgeList(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open file: " + filename);
+    }
+
+    std::vector<std::pair<int, int>> edges;
+    int u, v;
+    int max_node = 0;
+    while (file >> u >> v) {
+        edges.push_back({u, v});
+        if (u > max_node) max_node = u;
+        if (v > max_node) max_node = v;
+    }
+
+    Graph g(max_node + 1);
+    for (const auto& edge : edges) {
+        g.addEdge(edge.first, edge.second);
+    }
+    return g;
+}
+
+
+// --- Centrality Implementations ---
+
+// Degree Centrality
+std::vector<double> Centrality::degree(const Graph& g) {
+    std::vector<double> degrees(g.V);
+    for (int i = 0; i < g.V; ++i) {
+        degrees[i] = g.adj[i].size();
+    }
+    return degrees;
+}
+
+// Closeness Centrality
+std::vector<double> Centrality::closeness(const Graph& g) {
+    std::vector<double> closeness_scores(g.V, 0.0);
+
+    #pragma omp parallel for
+    for (int i = 0; i < g.V; ++i) {
+        std::vector<int> dist(g.V, -1);
+        std::queue<int> q;
+
+        q.push(i);
+        dist[i] = 0;
+        long long total_dist = 0;
+        int reachable_nodes = 0;
+
+        std::queue<int> bfs_q;
+        bfs_q.push(i);
+        std::vector<int> d(g.V, -1);
+        d[i] = 0;
+
+        while(!bfs_q.empty()){
+            int u = bfs_q.front();
+            bfs_q.pop();
+
+            reachable_nodes++;
+            total_dist += d[u];
+
+            for(int v : g.adj[u]){
+                if(d[v] == -1){
+                    d[v] = d[u] + 1;
+                    bfs_q.push(v);
+                }
+            }
+        }
+
+        if (total_dist > 0) {
+            closeness_scores[i] = (double)(reachable_nodes - 1) / total_dist;
+        }
+    }
+    return closeness_scores;
+}
+
+
+// Betweenness Centrality (Brandes' Algorithm)
+std::vector<double> Centrality::betweenness(const Graph& g) {
+    std::vector<double> betweenness(g.V, 0.0);
+
+    #pragma omp parallel for
+    for (int s = 0; s < g.V; ++s) {
+        std::stack<int> S;
+        std::vector<std::vector<int>> pred(g.V);
+        std::vector<long long> sigma(g.V, 0);
+        std::vector<int> dist(g.V, -1);
+        std::vector<double> delta(g.V, 0.0);
+
+        sigma[s] = 1;
+        dist[s] = 0;
+        std::queue<int> Q;
+        Q.push(s);
+
+        while (!Q.empty()) {
+            int v = Q.front();
+            Q.pop();
+            S.push(v);
+            for (int w : g.adj[v]) {
+                if (dist[w] < 0) {
+                    Q.push(w);
+                    dist[w] = dist[v] + 1;
+                }
+                if (dist[w] == dist[v] + 1) {
+                    sigma[w] += sigma[v];
+                    pred[w].push_back(v);
+                }
+            }
+        }
+
+        while (!S.empty()) {
+            int w = S.top();
+            S.pop();
+            for (int v : pred[w]) {
+                if (sigma[w] != 0) {
+                    delta[v] += (static_cast<double>(sigma[v]) / sigma[w]) * (1.0 + delta[w]);
+                }
+            }
+            if (w != s) {
+                #pragma omp atomic
+                betweenness[w] += delta[w];
+            }
+        }
+    }
+
+    // For undirected graphs, divide by 2
+    for (int i = 0; i < g.V; ++i) {
+        betweenness[i] /= 2.0;
+    }
+
+    return betweenness;
+}
+
+// Eigenvector Centrality
+std::vector<double> Centrality::eigenvector(const Graph& g, int max_iterations, double tolerance) {
+    std::vector<double> centrality(g.V, 1.0);
+    
+    for (int iter = 0; iter < max_iterations; ++iter) {
+        std::vector<double> next_centrality(g.V, 0.0);
+        double norm = 0.0;
+        
+        #pragma omp parallel for reduction(+:norm)
+        for (int i = 0; i < g.V; ++i) {
+            for (int neighbor : g.adj[i]) {
+                next_centrality[i] += centrality[neighbor];
+            }
+            norm += next_centrality[i] * next_centrality[i];
+        }
+
+        norm = std::sqrt(norm);
+        if (norm == 0) break;
+
+        double diff = 0.0;
+        #pragma omp parallel for reduction(+:diff)
+        for(int i = 0; i < g.V; ++i) {
+            next_centrality[i] /= norm;
+            diff += std::abs(centrality[i] - next_centrality[i]);
+        }
+        
+        centrality = next_centrality;
+        if (diff < g.V * tolerance) break;
+    }
+    
+    return centrality;
+}
+
+// PageRank
+std::vector<double> Centrality::pageRank(const Graph& g, double damping, int max_iterations, double tolerance) {
+    std::vector<double> rank(g.V, 1.0 / g.V);
+    std::vector<double> out_degree(g.V);
+    for(int i=0; i<g.V; ++i) out_degree[i] = g.adj[i].size();
+
+    for (int iter = 0; iter < max_iterations; ++iter) {
+        std::vector<double> next_rank(g.V, 0.0);
+        double dangling_sum = 0.0;
+
+        #pragma omp parallel for reduction(+:dangling_sum)
+        for (int i = 0; i < g.V; ++i) {
+            if (out_degree[i] == 0) {
+                dangling_sum += rank[i];
+            }
+        }
+
+        #pragma omp parallel for
+        for (int i = 0; i < g.V; ++i) {
+            double incoming_rank_sum = 0.0;
+            for (int neighbor : g.adj[i]) {
+                if(out_degree[neighbor] > 0)
+                    incoming_rank_sum += rank[neighbor] / out_degree[neighbor];
+            }
+            next_rank[i] = (1.0 - damping) / g.V + damping * (incoming_rank_sum + dangling_sum / g.V);
+        }
+
+        double diff = 0.0;
+        #pragma omp parallel for reduction(+:diff)
+        for(int i=0; i<g.V; ++i) {
+            diff += std::abs(rank[i] - next_rank[i]);
+        }
+
+        rank = next_rank;
+        if (diff < g.V * tolerance) break;
+    }
+
+    return rank;
+}
+
+// Katz Centrality
+std::vector<double> Centrality::katz(const Graph& g, double alpha, double beta, int max_iterations, double tolerance) {
+    std::vector<double> centrality(g.V, 1.0);
+
+    for (int iter = 0; iter < max_iterations; ++iter) {
+        std::vector<double> next_centrality(g.V, 0.0);
+        
+        #pragma omp parallel for
+        for (int i = 0; i < g.V; ++i) {
+            for (int neighbor : g.adj[i]) {
+                next_centrality[i] += centrality[neighbor];
+            }
+        }
+        
+        double diff = 0.0;
+        #pragma omp parallel for reduction(+:diff)
+        for (int i = 0; i < g.V; ++i) {
+            next_centrality[i] = alpha * next_centrality[i] + beta;
+            diff += std::abs(centrality[i] - next_centrality[i]);
+        }
+        
+        centrality = next_centrality;
+        if (diff < g.V * tolerance) break;
+    }
+    
+    return centrality;
+}

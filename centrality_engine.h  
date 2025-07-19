@@ -1,0 +1,34 @@
+#ifndef CENTRALITY_ENGINE_H
+#define CENTRALITY_ENGINE_H
+
+#include <vector>
+#include <string>
+#include <map>
+
+// Represents the graph structure using an adjacency list.
+class Graph {
+public:
+    int V; // Number of vertices
+    std::vector<std::vector<int>> adj; // Adjacency list
+
+    Graph() : V(0) {}
+    explicit Graph(int V);
+    void addEdge(int u, int v);
+};
+
+// Contains functions to load a graph from external sources.
+namespace GraphLoader {
+    Graph loadFromEdgeList(const std::string& filename);
+}
+
+// Contains all centrality calculation algorithms.
+namespace Centrality {
+    std::vector<double> degree(const Graph& g);
+    std::vector<double> closeness(const Graph& g);
+    std::vector<double> betweenness(const Graph& g);
+    std::vector<double> eigenvector(const Graph& g, int max_iterations = 100, double tolerance = 1e-6);
+    std::vector<double> pageRank(const Graph& g, double damping = 0.85, int max_iterations = 100, double tolerance = 1e-6);
+    std::vector<double> katz(const Graph& g, double alpha = 0.1, double beta = 1.0, int max_iterations = 100, double tolerance = 1e-6);
+}
+
+#endif // CENTRALITY_ENGINE_H
